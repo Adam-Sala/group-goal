@@ -1,0 +1,66 @@
+rules_version = '2';
+service cloud.firestore {
+ match /databases/{database}/documents {
+  function signed() { return request.auth != null; }
+  function group(g) { return get(/databases/$(database)/documents/ggGroups/$(g)).data; }
+  function owner(g) { return signed() && group(g).ownerUid == request.auth.uid; }
+  function membership(g) { return get(/databases/$(database)/documents/ggGroups/$(g)/members/$(request.auth.uid)).data; }
+  function member(g) { return signed() && membership(g).version == group(g).accessVersion && get(/databases/$(database)/documents/ggInvites/$(membership(g).key)).data.groupId == g && get(/databases/$(database)/documents/ggInvites/$(membership(g).key)).data.version == group(g).accessVersion; }
+  function access(g) { return owner(g) || member(g); }
+  function ownPlayer(g,p) { return member(g) && membership(g).playerId == p && get(/databases/$(database)/documents/ggGroups/$(g)/players/$(p)).data.ownerUid == request.auth.uid; }
+  function status(s) { return s in ['Available','Travel','Sick','Injured','At work']; }
+  function playerValid(d,p) { return d.keys().hasOnly(['id','name','photo','ownerUid','availability']) && d.id == p && d.name is string && d.name.size() > 0 && d.name.size() <= 35 && d.photo is string && d.photo.size() <= 30000 && (d.photo == '' || d.photo.matches('data:image/jpeg;base64,.*')) && d.ownerUid is string && status(d.availability); }
+  function matchValid(d,m) { return d.keys().hasOnly(['id','title','format','date','time','field','booking','price','entries','positions']) && d.id == m && d.title is string && d.title.size() > 0 && d.title.size() <= 80 && d.format in [5,7,8] && d.date is string && d.date.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}') && d.time is string && d.time.matches('[0-9]{2}:[0-9]{2}') && d.field is string && d.field.size() <= 100 && d.booking in ['Booked','Pending'] && d.price is number && d.price >= 0 && d.price <= 10000 && d.entries is list && d.entries.size() <= 30 && d.entries.toSet().size() == d.entries.size() && d.positions is map && d.positions.keys().hasOnly(d.entries) && d.positions.values().toSet().size() == d.positions.size() && (d.format == 5 ? d.positions.values().hasOnly([0,1,2,3,4,5,6,7,8,9,10,11,12,13]) : d.format == 7 ? d.positions.values().hasOnly([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]) : d.positions.values().hasOnly([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19])); }
+  function memberMatch(g) {
+   let p = membership(g).playerId;
+   let n = request.resource.data;
+   let o = resource.data;
+   let cap = o.format*2+4;
+   let promoted = o.entries.size() > cap && o.entries.hasAny([p]) && !n.entries.hasAny([p]) ? o.entries[cap] : p;
+   return p != '' && get(/databases/$(database)/documents/ggGroups/$(g)/players/$(p)).data.ownerUid == request.auth.uid && n.diff(o).affectedKeys().hasOnly(['entries','positions']) && n.entries.removeAll([p]) == o.entries.removeAll([p]) && n.positions.diff(o.positions).affectedKeys().hasOnly([p,promoted]) && (promoted == p || o.positions.get(promoted,null) == null || n.positions.get(promoted,null) == o.positions.get(promoted,null)) && (!n.entries.hasAny([p]) || getAfter(/databases/$(database)/documents/ggGroups/$(g)/players/$(p)).data.availability == 'Available');
+  }
+  match /ggUsernames/{username} {
+   allow get: if signed();
+   allow list: if false;
+   allow create: if signed() && username.matches('[a-z0-9_]{3,50}') && request.auth.token.email == username+'@group-goal.invalid' && request.resource.data.keys().hasOnly(['groupId','salt']) && request.resource.data.groupId == request.auth.uid && request.resource.data.salt is string && request.resource.data.salt.size() == 32 && getAfter(/databases/$(database)/documents/ggGroups/$(request.auth.uid)).data.ownerUid == request.auth.uid;
+   allow update,delete: if false;
+  }
+  match /ggInvites/{key} {
+   allow get: if signed();
+   allow list: if false;
+   allow create,update: if (!exists(/databases/$(database)/documents/ggInvites/$(key)) || resource.data.groupId == request.resource.data.groupId) && signed() && key.matches('[a-f0-9]{64}') && request.resource.data.keys().hasOnly(['groupId','version']) && getAfter(/databases/$(database)/documents/ggGroups/$(request.resource.data.groupId)).data.ownerUid == request.auth.uid && request.resource.data.version == getAfter(/databases/$(database)/documents/ggGroups/$(request.resource.data.groupId)).data.accessVersion;
+   allow delete: if owner(resource.data.groupId);
+  }
+  match /ggGroups/{g} {
+   allow get: if (signed() && g == request.auth.uid) || access(g);
+   allow list,delete: if false;
+   allow create: if signed() && g == request.auth.uid && request.resource.data.keys().hasOnly(['id','name','username','ownerUid','playerCount','accessVersion','salt']) && request.resource.data.id == g && request.resource.data.ownerUid == request.auth.uid && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 60 && request.resource.data.playerCount == 0 && request.resource.data.accessVersion == 1 && getAfter(/databases/$(database)/documents/ggUsernames/$(request.resource.data.username)).data.groupId == g && getAfter(/databases/$(database)/documents/ggUsernames/$(request.resource.data.username)).data.salt == request.resource.data.salt;
+   allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','playerCount','accessVersion']) && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 60 && request.resource.data.playerCount is int && request.resource.data.playerCount >= 0 && request.resource.data.playerCount <= 30 && (owner(g) || (member(g) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['playerCount']) && request.resource.data.playerCount == resource.data.playerCount+1 && membership(g).playerId == '' && getAfter(/databases/$(database)/documents/ggGroups/$(g)/members/$(request.auth.uid)).data.playerId != '' && !exists(/databases/$(database)/documents/ggGroups/$(g)/players/$(getAfter(/databases/$(database)/documents/ggGroups/$(g)/members/$(request.auth.uid)).data.playerId)) && getAfter(/databases/$(database)/documents/ggGroups/$(g)/players/$(getAfter(/databases/$(database)/documents/ggGroups/$(g)/members/$(request.auth.uid)).data.playerId)).data.ownerUid == request.auth.uid));
+   match /members/{u} {
+    allow get: if signed() && (u == request.auth.uid || owner(g));
+    allow list: if owner(g);
+    allow create: if signed() && u == request.auth.uid && request.resource.data.keys().hasOnly(['key','version','playerId','claimProof']) && request.resource.data.playerId == '' && request.resource.data.claimProof == '' && request.resource.data.version == group(g).accessVersion && get(/databases/$(database)/documents/ggInvites/$(request.resource.data.key)).data.groupId == g && get(/databases/$(database)/documents/ggInvites/$(request.resource.data.key)).data.version == group(g).accessVersion;
+    allow update: if signed() && u == request.auth.uid && request.resource.data.keys().hasOnly(['key','version','playerId','claimProof']) && ((request.resource.data.diff(resource.data).affectedKeys().hasOnly(['key','version']) && request.resource.data.version == group(g).accessVersion && get(/databases/$(database)/documents/ggInvites/$(request.resource.data.key)).data.groupId == g && get(/databases/$(database)/documents/ggInvites/$(request.resource.data.key)).data.version == group(g).accessVersion) || (member(g) && resource.data.playerId == '' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['playerId','claimProof']) && getAfter(/databases/$(database)/documents/ggGroups/$(g)/players/$(request.resource.data.playerId)).data.ownerUid == request.auth.uid));
+    allow delete: if owner(g);
+   }
+   match /players/{p} {
+    allow read: if access(g);
+    allow create: if playerValid(request.resource.data,p) && getAfter(/databases/$(database)/documents/ggGroups/$(g)).data.playerCount == group(g).playerCount+1 && (owner(g) || (member(g) && membership(g).playerId == '' && getAfter(/databases/$(database)/documents/ggGroups/$(g)/members/$(request.auth.uid)).data.playerId == p && request.resource.data.ownerUid == request.auth.uid));
+    allow update: if playerValid(request.resource.data,p) && (owner(g) || (ownPlayer(g,p) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['availability'])) || (member(g) && resource.data.ownerUid == '' && membership(g).playerId == '' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerUid']) && request.resource.data.ownerUid == request.auth.uid && getAfter(/databases/$(database)/documents/ggGroups/$(g)/members/$(request.auth.uid)).data.playerId == p && get(/databases/$(database)/documents/ggGroups/$(g)/claims/$(getAfter(/databases/$(database)/documents/ggGroups/$(g)/members/$(request.auth.uid)).data.claimProof)).data.playerId == p));
+    allow delete: if owner(g) && getAfter(/databases/$(database)/documents/ggGroups/$(g)).data.playerCount == group(g).playerCount-1;
+   }
+   match /claims/{proof} {
+    allow get: if access(g);
+    allow list: if owner(g);
+    allow create,update,delete: if owner(g);
+   }
+   match /codes/{p} { allow read,write: if owner(g); }
+   match /matches/{m} {
+    allow read: if access(g);
+    allow create: if owner(g) && matchValid(request.resource.data,m);
+    allow update: if matchValid(request.resource.data,m) && (owner(g) || (member(g) && memberMatch(g)));
+    allow delete: if owner(g);
+   }
+  }
+ }
+}
